@@ -1,4 +1,4 @@
-# ===== preprocess_xy_interactive.R =====
+# ===== preprocess raw .xy diffratogram =====
 #
 # ---- dependency check ----
 #
@@ -13,7 +13,9 @@ if (length(missing)) {
 # only data.table attached; others called directly with ::
 library(data.table)
 #
-# functions
+#
+###--- functions ---###
+#
 #
 # file picker
 .pick_file <- function() {
@@ -107,7 +109,7 @@ baseline_subtract_vec <- function(I, method = "rollingBall", ...) {
   if (toupper(method) == "SNIP") {
     dots <- list(...)
     iters  <- if (!is.null(dots$iterations)) as.integer(dots$iterations) else 60L
-    uselog <- isTRUE(dots$log)              # default FALSE unless set TRUE
+    uselog <- isTRUE(dots$log)
     off    <- if (!is.null(dots$offset)) dots$offset else NULL
     bl <- snip_baseline(y, iterations = iters, log = uselog, offset = off)
     corr <- y - bl
@@ -145,9 +147,7 @@ wavelet_denoise <- function(y, wf = "la8", L = 4, mode = c("soft","hard"),
   wf <- resolve_wavelet_name(wf)
   # clamp L to allowable range
   L <- clamp_levels(L, length(ypad))
-  
   d <- waveslim::dwt(ypad, wf = wf, n.levels = L, boundary = "periodic")
-  
   sigma_hat <- function(w) stats::mad(w, center = 0) / 0.6745
   shrink <- function(w, thr, mode) if (mode == "soft") sign(w)*pmax(abs(w)-thr,0) else w*(abs(w)>thr)
   
@@ -158,7 +158,6 @@ wavelet_denoise <- function(y, wf = "la8", L = 4, mode = c("soft","hard"),
       d[[paste0("d", lvl)]] <- shrink(w, thr, mode)
     }
   }
-  
   yrec <- waveslim::idwt(d)
   yrec[seq_len(n)]
 }
@@ -207,7 +206,6 @@ wavelet_preview3 <- function(x, y,
   }
   NULL
 }
-
 # Map friendly names -> waveslim codes and validate
 resolve_wavelet_name <- function(wf_in) {
   aliases <- c(
@@ -231,7 +229,6 @@ resolve_wavelet_name <- function(wf_in) {
   }
   w
 }
-
 # Clamp decomposition level to what the padded length allows
 clamp_levels <- function(L, n) {
   pow2 <- 2^ceiling(log2(n))          # padded length used in our dwt
@@ -240,8 +237,67 @@ clamp_levels <- function(L, n) {
   if (Lc != L) message("Adjusted levels L from ", L, " to ", Lc, " (signal length constraint).")
   Lc
 }
-
 #
+#
+###--- sample holder correction, 3 options (parameterized for aluminum) ---###
+#
+#
+# Top 5 aluminum holder fcc lattice parameters (face centered cubic, i.e. hkl)
+.smphldr_peaks <- function(lambda = 1.5406, a = 4.0495) {                       # default lambda = Cu Kα₁
+  hkls <- rbind(c(1,1,1), c(2,0,0), c(2,2,0), c(3,1,1), c(2,2,2))               # 2θ = 38.5, 44.7, 65.1, 78.2, 82.4
+  s2 <- rowSums(hkls^2)
+  dA <- a / sqrt(s2)                                                            # d-spacing in Angstroms
+  th <- asin(pmin(1, lambda / (2*dA)))                                          # rad conversion to deg 2θ
+  th2 <- 2 * th * 180/pi                                                        
+  data.frame(th2 = th2)
+}
+
+.al_template <- function(tt, fwhm_deg = 0.30, lambda = 1.5406, a = 4.0495,      # aluminum holder diffraction template
+                         shape = c("gauss","lorentz")) {
+  shape <- match.arg(shape)
+  pk <- .smphldr_peaks(lambda = lambda, a = a)$th2                              # relative intensities at Al peaks ≈ 100, 46, 21, 13, 8
+  relI <- c(100, 46, 21, 13, 8); relI <- relI / max(relI)
+  if (shape == "gauss") {
+    sig <- fwhm_deg / (2*sqrt(2*log(2)))
+    M <- vapply(seq_along(pk), function(i) relI[i]*exp(-0.5*((tt - pk[i])/sig)^2), 
+                numeric(length(tt)))
+  } else {
+      g <- fwhm_deg/2
+      M <- vapply(seq_along(pk), function(i) relI[i]*( g / ( (tt - pk[i])^2 + g^2 ) ), numeric(length(tt)))
+    }
+  tpl <- rowSums(M)
+  tpl / sqrt(sum(tpl^2, na.rm = TRUE))                                          # L2 normalization (rss) for stable scaling
+}
+
+.nnls_scalar <- function(x, y) {                                                # non-negative least squares scalar to fit sample holder peaks
+  den <- sum(x*x, na.rm = TRUE); if (den <= 0) return(0)                        # for alpha ≥ 0, y = alpha * x
+  max(0, sum(x*y, na.rm = TRUE) / den)
+}
+
+.smphldr_mask <- function(tt, half_window = 0.25, lambda = 1.5406, a = 4.0495){ # plot masks
+  centers <- .smphldr_peaks(lambda = lambda, a = a)$th2
+  rng <- range(tt, na.rm = TRUE)
+  centers_in <- centers[centers >= rng[1] & centers <= rng[2]]
+  keep <- rep(TRUE, length(tt))
+  if (length(centers_in)) {
+    for (c0 in centers_in) {
+      keep <- keep & !(tt >= (c0 - half_window) & tt <= (c0 + half_window))
+    }
+  }
+  list(
+    keep = keep,
+    centers_in = centers_in,                                                    # only those visible in current plot range
+    centers_all = centers,                                                      # full set is tracked for recipe
+    half_window = half_window
+  )
+}
+
+  #
+  #
+  ###--- tracking and outputs ---###
+  #
+  #
+
 # tracking preprocessing recipe
 apply_recipe_to_file <- function(file_path, recipe, save_baseline = FALSE, suffix = "_prepped.xy") {
   if (!file.exists(file_path)) stop("File not found: ", file_path)
@@ -271,8 +327,6 @@ apply_recipe_to_file <- function(file_path, recipe, save_baseline = FALSE, suffi
       y <- normalize_to_Imax(y, target_max = op$target_max)
     }
   }
-  
-  # output paths
   if (grepl("\\.xy$", file_path, ignore.case = TRUE)) {
     out_prepped  <- sub("\\.xy$", paste0(suffix), file_path, ignore.case = TRUE)
     out_baseline <- sub("\\.xy$", "_baseline.xy", file_path, ignore.case = TRUE)
@@ -288,7 +342,7 @@ apply_recipe_to_file <- function(file_path, recipe, save_baseline = FALSE, suffi
   invisible(list(prepped = out_prepped, baseline = if (save_baseline) out_baseline else NULL))
 }
 
-# Output path next to input file
+# Output path == input path
 make_out_path <- function(infile, suffix = "_prepped.xy") {
   if (grepl("\\.xy$", infile, ignore.case = TRUE)) {
     base <- sub("\\.xy$", "", infile, ignore.case = TRUE)
@@ -342,7 +396,7 @@ op_label <- function(op) {
          op$name
   )
 }
-# Short label for the final step only
+# Short label (final step)
 recipe_final_label <- function(recipe) {
   if (!length(recipe$ops)) return("Baseline only")
   op_label(recipe$ops[[length(recipe$ops)]])
@@ -356,10 +410,11 @@ recipe_compact_label <- function(recipe) {
   if (n_prior > 0) sprintf("%s  (+%d earlier)", final, n_prior) else final
 }
 
-
-# ---- preprocessing script----
 #
-
+#
+### ---- baseline subtraction (automatic) ---- ###
+#
+#
 preprocess_xy_interactive <- function() {
   file_path <- .pick_file()
   if (!nzchar(file_path) || !file.exists(file_path)) {
@@ -388,24 +443,28 @@ preprocess_xy_interactive <- function() {
   # initial preview
   plot_before_after(dt$tt, rawI, corrI)
   
-  # ===== OUTER MENU LOOP =====
+  #
+  #
+  ###---  MENU LOOP ---###
+  #
+  #
   repeat {
     choice <- utils::menu(
       c("Stop (return baseline-subtracted only)",  # 1
-        "Normalize max = 1",                       # 2
-        "Normalize area = 1",                      # 3
+        "Sample holder correction",                # 2
+        "Normalize area and intensity to 1",       # 3
         "Rescale by parameters",                   # 4
         "Smooth (SG / Wavelet)",                   # 5
         "Multiple steps (2–5 in sequence)",        # 6
         "Save processed to .xy",                   # 7
-        "Apply same steps to another file (auto-save)",  # 8 
+        "Repeat steps on another file (auto-save)",# 8 
         "Abort"),                                  # 9
       title = "\nAction options:"
     )
     if (choice == 0) break
     
     switch(choice,
-           { # 1) Stop -> return and exit
+           {                                                                    # 1) Stop -> return and exit
              return(invisible(list(
                file = file_path,
                tt   = dt$tt,
@@ -421,18 +480,93 @@ preprocess_xy_interactive <- function() {
              )))
            },
            
-           { # 2) Normalize max=1
+           {                                                                    # 2) Aluminum sample holder subtract submenu
+               method <- utils::menu(
+               c("Subtract empty-holder scan",                                  # first option: aluminum holder correction
+                 "Subtract Al template",
+                 "Mask Al peak windows"),
+               title = "Al holder correction"
+              )
+              if (method == 0) {                                                # user cancelled
+              } else if (method == 1) {                                         # Empty-holder subtraction
+               message("Choose empty holder diffractogram")
+               hold_path <- file.choose()
+               if (!nzchar(hold_path) || !file.exists(hold_path)) {
+                 message("No holder file selected.")
+                } else {
+                 y_before <- y
+                 h <- read_xy(hold_path)
+                 hI <- baseline_subtract_vec(h$I, method = "SNIP", iterations = 60)
+                 if (!isTRUE(all.equal(h$tt, dt$tt))) {                         # interpolate holder to sample grid if needed
+                   hI <- approx(h$tt, hI, xout = dt$tt, rule = 2)$y
+                 }
+                 alpha <- .nnls_scalar(hI, y)
+                 y <- pmax(0, y - alpha*hI)
+                 steps_applied <- c(steps_applied, sprintf("Al-holder subtract (α=%.3f)", alpha))
+                 plot_before_after(dt$tt, y_before, y,
+                                   main_before = "Before Al correction",
+                                   main_after  = sprintf("After: holder subtract (α=%.3f)", alpha))
+                 if (tolower(readline("Keep this change? [Y/n]: ")) == "n") {
+                   y <- y_before; steps_applied <- head(steps_applied, -1); message("Reverted.")
+                 }
+               }
+               
+               } else if (method == 2) {                                        # Template subtraction (fcc Al, Cu Kα)
+               y_before <- y                                                    
+               tpl <- .al_template(dt$tt, fwhm_deg = 0.30, lambda = 1.5406, a = 4.0495, shape = "gauss") # L2 normalization for template (rss)
+               alpha <- .nnls_scalar(tpl, y)                                 #alpha scalar projects y onto template (0=no signal)
+               y <- pmax(0, y - alpha*tpl)
+               steps_applied <- c(steps_applied, sprintf("Al-template subtract (α=%.3f)", alpha))
+               rss_before <- sum((y_before)^2)
+               rss_after  <- sum(y^2)
+               message(sprintf("Al subtraction: alpha=%.3f, RSS reduction=%.2f%%",
+                               alpha, 100*(rss_before - rss_after)/rss_before))
+               plot_before_after(dt$tt, y_before, y,
+                                 main_before = "Before aluminum template subtract",
+                                 main_after  = sprintf("After aluminum template subtract (α=%.3f)", alpha))
+               if (tolower(readline("Keep this change? [Y/n]: ")) == "n") {
+                 y <- y_before; steps_applied <- head(steps_applied, -1); message("Reverted.")
+               }
+               
+               } else if (method == 3) {
+                 m <- .smphldr_mask(dt$tt, half_window = 0.25, lambda = 1.5406, a = 4.0495)
+                 attr(y, "mask_al") <- m
+                 steps_applied <- c(steps_applied,
+                                    if (length(m$centers_in))
+                                      sprintf("Al-mask (±%.2f°) at %s",
+                                              m$half_window,
+                                              paste(round(m$centers_in, 2), collapse = ", "))
+                                    else
+                                      sprintf("Al-mask (±%.2f°) [no Al peaks in range]", m$half_window))
+                 plot_before_after(                                             # plot & annotate only visible masks
+                   dt$tt, y, y,
+                   main_before = "Mask preview",
+                   main_after  = if (length(m$centers_in))
+                     sprintf("Masked %d windows at: %s",
+                             length(m$centers_in),
+                             paste(round(m$centers_in, 2), collapse = ", "))
+                   else
+                     "No Al peaks within this 2θ range"
+                 )
+                 if (length(m$centers_in)) {
+                   abline(v = m$centers_in, lty = 3)
+                   usr <- par("usr")                                            # mask labels
+                   y_top <- usr[4]
+                   text(x = m$centers_in, y = y_top, labels = round(m$centers_in, 2),
+                        pos = 3, cex = 0.8)
+                 }
+               }
+             },
+           
+          {                                                                     # 3) Normalize: area=1, max=1
              y <- normalize_max1(y)
              steps_applied <- c(steps_applied, "norm_max1")
-           },
-           
-           { # 3) Normalize area=1
              step_est <- median(diff(dt$tt))
              y <- normalize_area1(y, step = step_est)
              steps_applied <- c(steps_applied, "norm_area1")
-           },
-           
-           { # 4) Rescale by parameters (your existing Option 4 block goes here unchanged)
+          },
+          
+          {                                                                     # 4) Rescale by parameters
              repeat {
                cat("\n--- Set scaling / grid / alignment parameters ---\n")
                def_target_max <- 10000
@@ -487,7 +621,7 @@ preprocess_xy_interactive <- function() {
              }
            },
            
-           { # 5) Smoothing (SG / Wavelet / Preview)
+         {                                                                      # 5) Smoothing (SG / Wavelet / Preview)
              sm_choice <- utils::menu(
                c("Savitzky–Golay (p=2, n=5)",
                  "Savitzky–Golay (p=2, n=7)",
@@ -496,37 +630,28 @@ preprocess_xy_interactive <- function() {
                  "Wavelet: Preview 3 variants (db4)"),
                title = "Choose smoothing"
              )
-             if (sm_choice == 0) next  # back to main menu
-             
+             if (sm_choice == 0) next
              y_before <- y
              y_new <- NULL
              step_tag <- NULL
              label <- NULL
              meta <- NULL
-             
-             if (sm_choice == 1) {
-               # SG (p=2, n=5)
+             if (sm_choice == 1) {                                              # SG (p=2, n=5)
                y_new <- sg_smooth(y, n = 5, p = 2)
                step_tag <- "SG(p=2,n=5)"
                label <- "Savitzky–Golay (p=2, n=5)"
                meta <- list(name = "sg", p = 2, n = 5)
-               
-             } else if (sm_choice == 2) {
-               # SG (p=2, n=7)
+             } else if (sm_choice == 2) {                                       # SG (p=2, n=7)
                y_new <- sg_smooth(y, n = 7, p = 2)
                step_tag <- "SG(p=2,n=7)"
                label <- "Savitzky–Golay (p=2, n=7)"
                meta <- list(name = "sg", p = 2, n = 7)
-               
-             } else if (sm_choice == 3) {
-               # Quick wavelet preset (db4 ≈ waveslim 'la8')
+             } else if (sm_choice == 3) {                                       # Quick wavelet preset (db4 ≈ waveslim 'la8')
                y_new <- wavelet_denoise(y, wf = "la8", L = 4, mode = "soft", alpha = 1.0, level_min = 1)
                step_tag <- "Wavelet(db4,soft,L=4,alpha=1.0,level_min=1)"
                label <- "Wavelet (Daubechies db4), soft, L=4, α=1.0"
                meta <- list(name = "wavelet", wf = "la8", L = 4, mode = "soft", alpha = 1.0, level_min = 1)
-               
-             } else if (sm_choice == 4) {
-               # Custom wavelet (wavelet_denoise() resolves/validates wf internally)
+             } else if (sm_choice == 4) {                                       # Custom wavelet
                cat("\n--- Wavelet (custom) ---\n")
                wf_in <- readline("Wavelet [db4/la8/haar/coif2...] (default la8): ")
                if (!nzchar(wf_in)) wf_in <- "la8"
@@ -538,7 +663,6 @@ preprocess_xy_interactive <- function() {
                if (!is.finite(alpha_in)) alpha_in <- 1.0
                lvlmin_in <- suppressWarnings(as.integer(readline("Start thresholding from detail level (1=fine) [default 1]: ")))
                if (!is.finite(lvlmin_in)) lvlmin_in <- 1L
-               
                y_new <- wavelet_denoise(y, wf = wf_in, L = L_in, mode = mode_in,
                                         alpha = alpha_in, level_min = lvlmin_in)
                step_tag <- sprintf("Wavelet(%s,%s,L=%d,alpha=%.2f,level_min=%d)",
@@ -547,9 +671,7 @@ preprocess_xy_interactive <- function() {
                                 wf_in, mode_in, L_in, alpha_in, lvlmin_in)
                meta <- list(name = "wavelet", wf = wf_in, L = L_in, mode = mode_in,
                             alpha = alpha_in, level_min = lvlmin_in)
-               
-             } else if (sm_choice == 5) {
-               # Preview three db4 variants
+             } else if (sm_choice == 5) {                                       # Preview three db4 variants
                prev <- wavelet_preview3(
                  dt$tt, y,
                  variants = list(
@@ -559,8 +681,7 @@ preprocess_xy_interactive <- function() {
                  ),
                  wf = "la8", mode = "soft", level_min = 1
                )
-               if (is.null(prev)) next  # back to menu
-               
+               if (is.null(prev)) next                                          # back to submenu
                y_before <- y
                y_new    <- prev$y
                step_tag <- prev$label
@@ -575,19 +696,18 @@ preprocess_xy_interactive <- function() {
                                main_before = "Before smoothing",
                                main_after  = paste("After:", label)
              )
-               
              keep <- tolower(trimws(readline("Keep these smoothing changes? [Y/n]: ")))
              if (keep %in% c("", "y", "yes")) {
                y <- y_new
                steps_applied <- c(steps_applied, step_tag)
-               if (!is.null(meta)) recipe$ops <- c(recipe$ops, list(meta))  # <-- the only place we log
+               if (!is.null(meta)) recipe$ops <- c(recipe$ops, list(meta))      # recipe tracking
                cat("Changes kept.\n")
              } else {
                cat("Changes discarded. Keeping previous series.\n")
              }
            },
-           
-           { # 6) Multiple steps (batch of 2–5)
+         
+           {                                                                    # 6) Multiple steps (batch of 2–5)
              repeat {
                sub_choice <- utils::menu(
                  c("Normalize max=1","Normalize area=1","Rescale by factor","Smooth (moving average)","Done"),
@@ -600,20 +720,16 @@ preprocess_xy_interactive <- function() {
              }
            },
            
-           { # 7) Save processed to .xy (current series only)
-             y_out <- y
-             
-             # default name from current file
+           {                                                                    # 7) Save current version to .xy
+             y_out <- y                                                         # default name from current file
              default_out <- if (grepl("\\.xy$", file_path, ignore.case = TRUE)) {
                sub("\\.xy$", "_prepped.xy", file_path, ignore.case = TRUE)
              } else {
                paste0(file_path, "_prepped.xy")
              }
-             
              cat("\nDefault output:\n", default_out, "\n", sep = "")
              out_path <- readline("Enter output path (or press Enter for default): ")
              if (!nzchar(out_path)) out_path <- default_out
-             
              if (file.exists(out_path) && tolower(readline("File exists. Overwrite? [y/N]: ")) != "y") {
                cat("Save cancelled.\n")
              } else {
@@ -622,7 +738,7 @@ preprocess_xy_interactive <- function() {
              }
            },
            
-           { # 8) Apply same steps to another file (auto-save using new file name)
+           {                                                                    # 8) Apply same steps to another file (auto-save current default file name)
              if (length(recipe$ops) == 0) {
                cat("No steps recorded beyond baseline — nothing to replay.\n")
                next
@@ -630,15 +746,9 @@ preprocess_xy_interactive <- function() {
              cat("\nSelect a NEW file to process with the recorded steps...\n")
              new_file <- .pick_file()
              if (!nzchar(new_file) || !file.exists(new_file)) { cat("No file selected.\n"); next }
-             
-             # Process the new file (baseline + recorded ops)
-             dt_new <- read_xy(new_file)
+             dt_new <- read_xy(new_file)                                        # Process the new file (baseline + recorded recipe)
              res_new <- apply_recipe_to_data(dt_new, recipe)
-             
-             # Label the 'After:' panel by the FINAL step, not the first one
-             lbl_after <- recipe_compact_label(recipe)  # or use recipe_final_label(recipe)
-             
-             # Show Before/After on the NEW file
+             lbl_after <- recipe_compact_label(recipe)                          # Label plot 'After:' panel with the FINAL step or use recipe
              plot_before_after(
                dt_new$tt,
                res_new$corrI,
@@ -646,18 +756,11 @@ preprocess_xy_interactive <- function() {
                main_before = "Baseline-corrected (new file)",
                main_after  = paste("After:", lbl_after)
              )
-             
-             # Auto-save next to the NEW file, avoiding overwrite
-             out_prepped <- make_out_path(new_file, suffix = "_prepped.xy")
+             out_prepped <- make_out_path(new_file, suffix = "_prepped.xy")     # Auto-save next to the NEW file, avoiding overwrite
              write_xy_file(out_prepped, dt_new$tt, res_new$y)
              cat("Processed and saved: ", out_prepped, "\n", sep = "")
              
-             # Optional: also save baseline-only for the new file
-             # out_base <- make_out_path(new_file, suffix = "_baseline.xy")
-             # write_xy_file(out_base, dt_new$tt, res_new$corrI)
-             # cat("Baseline-only saved: ", out_base, "\n", sep = "")
-             
-             # Optional: make the NEW file the current working dataset
+             # make the NEW file the current working dataset
              file_path <- new_file
              dt <- dt_new
              rawI <- dt$I
@@ -676,7 +779,7 @@ preprocess_xy_interactive <- function() {
     ) # end switch
     
   } # end repeat
-    # If we get here, the user closed the menu (choice == 0) or fell through.
+    # user aborted (choice == 0) or fell through
   return(invisible(list(
     file = file_path,
     tt = dt$tt,
@@ -690,7 +793,11 @@ preprocess_xy_interactive <- function() {
     lib_grid = if (!is.null(attr(y, "preproc_params")))
       attr(y, "preproc_params")$lib_grid else NULL
   )))
-} # end of preprocess
+} # end
 
-# autorun
+#
+#
+###--- autorun ---###
+#
+#
 preprocess_xy_interactive()
