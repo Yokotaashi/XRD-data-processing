@@ -1,374 +1,361 @@
 #
-## --- SET DEFAULT PARAMETERS ---
-#                                                            # library pattern matching parameters (choice 2) 
-DEFAULT_LIB_STEP    <- 0.02             #0.02                # deg 2θ (your library step)
-DEFAULT_MAX_SHIFT   <- 0.20             #0.20                # deg 2θ search window (±)
-DEFAULT_SHIFT_STEP  <- 0.02             #0.02                # deg 2θ shift increment
-DEFAULT_TOP_N       <- 10               #10                  # how many matches to list
-DEFAULT_OVERLAY_K   <- 3L               #3L                  # how many overlays to plot/save
-DEFAULT_AMORPH      <- FALSE            #FALSE               # optional library pre-treatment
-DEFAULT_AMORPH_FWHM <- 0.20             #0.20                # moderate environmental lattice strain
-out_dir             <- NULL
-out_csv             <- NULL
-
-DEFAULT_SCAN <- list(
-  max_shift        = 1.0,               #1.0                 # global scan default parameters
-  shift_step       = 0.1,               #0.1
-  refine           = TRUE,              #TRUE
-  refine_win       = 0.06,              #0.06
-  refine_step      = 0.02               #0.01
-)
-
-DEFAULT_CFG <- list(                                         # peak matching parameters
-  tol                 = 0.75,           #0.08                # default tolerance (degrees 2θ)
-  heavy_thr           = 0.30,           #0.50                # default heavy peak intensity
-  heavy_penalty       = 1.0,            #1.0                 # default penalty for absent heavy peaks
-  weight_gamma        = 1.2,            #1.0                 # exponent to modify library peaks
-  min_matches         = 0L,             #0L                  # optional gate
-  require_heavy_match = FALSE           #FALSE
-)
-
-DEFAULT_DET_EXP <- list(
-  rel_min          = 0.15,               #0.20               # minimum peak height
-  min_spacing      = 0.25,               #0.01               # allowed peak spacing
-  prominence_rel   = 0.08,               #0.02               # accept peaks over this percentage of the max
-  prom_window      = 0.25,               #0.08               # half-window for local baseline
-  smooth_k         = 3,                  #3                  # MA window for detection only (odd)
-  w_gamma          = 0.85,               #0.85               # compress dynamic range of weights
-  min_keep         = 7                   #8                  # minimum amount of peaks to return (override rules)
-)
-
-DEFAULT_DET_LIB <- list(
-  rel_min          = 0.20,               #0.20
-  min_spacing      = 0.06,               #0.06
-  smooth_k         = 1,                  #1,                 # smoothing parameter (if needed)
-  w_gamma          = 1.0,                #1.0                # no compression for weighting calculations
-  prominence_rel   = NULL,
-  prom_window      = NULL,
-  min_keep         = 0                   #0
-)
-
+#####===== Matching techniques for preprocessed, experimental .xy spectra =====####               
+#                                                                                
+                                                                                  # for use with an audited, standardized .xy reference library
+###--- Default parameter settings ---###
 #
-## --- top menu ---
+#
+# matching parameters (choice 2):      current settings:       suggested values:
+       DEFAULT_LIB_STEP                <- 0.02                 # 0.02             # deg 2θ (your library step)
+       DEFAULT_MAX_SHIFT               <- 0.20                 # 0.20             # deg 2θ search window (±)
+       DEFAULT_SHIFT_STEP              <- 0.02                 # 0.02             # deg 2θ shift increment
+       DEFAULT_TOP_N                   <- 10                   # 10               # how many matches to list
+       DEFAULT_OVERLAY_K               <- 3L                   # 3L               # how many overlays to plot/save
+       DEFAULT_AMORPH                  <- FALSE                # FALSE            # library 'amorphous' transformation option
+       DEFAULT_AMORPH_FWHM             <- 0.20                 # 0.20             # moderate environmental lattice strain (for amorphous transform)
+       out_dir                         <- NULL
+       out_csv                         <- NULL
+
+       DEFAULT_SCAN <- list(                                                      # global scan default parameters
+         max_shift                     = 1.0,                  # 1.0               
+         shift_step                    = 0.2,                  # 0.1
+         refine                        = TRUE,                 # TRUE
+         refine_win                    = 0.06,                 # 0.06
+         refine_step                   = 0.02                  # 0.01
+       )
+       DEFAULT_CFG <- list(                                                       # peak weighting/scoring parameters
+         tol                           = 0.75,                 # 0.08             # lateral tolerance (deg 2θ)
+         heavy_thr                     = 0.30,                 # 0.50             # peak intensity threshhold for 'heavy' peak weight
+         heavy_penalty                 = 1.0,                  # 1.0              # penalty for absent heavy peaks
+         weight_gamma                  = 1.2,                  # 1.0              # exponent to modify library peaks
+         min_matches                   = 0L,                   # 0L               # optional gate
+         require_heavy_match           = FALSE                 # FALSE            # TRUE = "oh shit" lever (if too many/distracting matches)
+       )
+       DEFAULT_DET_EXP <- list(
+         rel_min                       = 0.15,                 # 0.20             # minimum peak height
+         min_spacing                   = 0.25,                 # 0.01             # allowed peak spacing
+         prominence_rel                = 0.08,                 # 0.02             # accept peaks over this percentage of the max
+         prom_window                   = 0.25,                 # 0.08             # half-window for local baseline
+         smooth_k                      = 3,                    # 3                # MA window for detection only (odd)
+         w_gamma                       = 0.85,                 # 0.85             # compress dynamic range of weights
+         min_keep                      = 7                     # 8                # minimum amount of peaks to return (override rules)
+       )
+       options(warnPartialMatchDollar  = TRUE)
+#
+#
+###--- top menu ---###
+#
 #
 run_matching_menu <- function() {
-  choice <- utils::menu(
-    c(
-      "Peak-only (fast) — use indexed peaks ≥20% of max; shift ±1.0° step 0.1°",
-      "Full-profile (correlation) — clamped scaling; optional amorphization"
-    ),
-    title = "Choose matching method"
-  )
-  if (choice == 0) { message("Cancelled."); return(invisible(NULL)) }
-  # Pick experimental file (prepped .xy) *after* method choice
-  message("Select prepped experimental .xy")
-  exp_xy <- try(file.choose(), silent = TRUE)
-  if (inherits(exp_xy, "try-error") || !nzchar(exp_xy) || !file.exists(exp_xy)) {
-    message("No file selected."); return(invisible(NULL))
-  }
-  # Pick/confirm library directory
-  lib_dir <- if (exists("get_or_choose_lib_dir")) {
-    get_or_choose_lib_dir(default = dirname(exp_xy))
-  } else {
-    if (.Platform$OS.type == "windows") {
-      d <- utils::choose.dir(default = dirname(exp_xy)); if (is.na(d)) d <- ""
-    } else {
-      d <- readline(sprintf("Enter library directory path [%s]: ", dirname(exp_xy)))
-      if (!nzchar(d)) d <- dirname(exp_xy)
-    }
-    if (!dir.exists(d)) { message("No valid library directory."); return(invisible(NULL)) }
-    normalizePath(d, winslash = "/")
-  }
-  message("Library directory: ", normalizePath(lib_dir, winslash = "/", mustWork = FALSE))
-  if (choice == 1) {                                                            # Peak-only matcher (peak-stick method)
-    if (!exists("compare_peaks_to_library")) {
-      stop("compare_peaks_to_library() not found. Source the function before running the menu.")
-    }
-    compare_peaks_to_library(
-      exp_xy_path = exp_xy,
-      lib_dir     = lib_dir,
-    )
-  } else if (choice == 2) {                                                     # Full-profile pattern matcher (3 correlation
-    if (!exists("compare_xy_to_library")) {                                     # methods with optional amorphization)
-      stop("compare_xy_to_library() not found. Source the function before running the menu.")
-    }
-    use_amorph <- tolower(trimws(readline("Turn ON amorphization for library? [y/N]: "))) %in% c("y","yes")
-    amorph_fwhm <- 0
-    if (use_amorph) {
-      ai <- suppressWarnings(as.numeric(readline("Gaussian FWHM (deg 2θ) [default 0.20]: ")))
-      if (!is.finite(ai)) ai <- 0.20
-      amorph_fwhm <- ai
-    }
-    compare_xy_to_library(
-      exp_xy_path       = exp_xy,
-      lib_dir           = lib_dir,
-    )
-  }
-  
-  invisible(TRUE)
-}
-
+              choice <- utils::menu(c(
+                          "Peak-only (fast) — use indexed peaks ≥20% of max; shift ±1.0° step 0.1°",
+                          "Full-profile (correlation) — clamped scaling; optional amorphization"),
+                          title = "Choose matching method")
+                        if (choice == 0) { 
+                           message("Cancelled.")
+                           return(invisible(NULL)) 
+                        }
+                        message("Select prepped experimental .xy") 
+                        exp_xy <- try(file.choose(), silent = TRUE)                # Pick experimental file (prepped .xy) *after* method choice
+                        if (inherits(exp_xy, "try-error") 
+                           || !nzchar(exp_xy) || !file.exists(exp_xy)) {
+                           message("No file selected.")
+                           return(invisible(NULL))
+                        }
+             lib_dir <- if (exists("get_or_choose_lib_dir")) {                     # Pick/confirm library directory
+                           get_or_choose_lib_dir(default = dirname(exp_xy))
+                        } else { if (.Platform$OS.type == "windows") {
+                                    if (is.na(d)) d <- ""
+                                 } else {d <- readline(sprintf(
+                                     "Enter library directory path [%s]: ", 
+                                     dirname(exp_xy)))
+                                     if (!nzchar(d)) d <- dirname(exp_xy)
+                                 }
+                                 if (!dir.exists(d)) { message("No valid library directory.")
+                                    return(invisible(NULL))
+                                 }
+                                 normalizePath(d, winslash = "/")
+                        }
+                        message("Library directory: ", normalizePath(lib_dir, winslash = "/", 
+                                mustWork = FALSE))
+                        if (choice == 1) {                                         # Peak-only matcher (stick method)
+                           compare_peaks_to_library(exp_xy_path = exp_xy,
+                                                    lib_dir = lib_dir)
+                        } else if (choice == 2) {                                  # Full-profile pattern matcher (3 correlation
+                    use_amorph <- tolower(trimws(readline(
+                                    "Turn ON amorphization for library? [y/N]: "))) 
+                                    %in% c("y","yes")
+                   amorph_fwhm <- 0
+                                  if (use_amorph) {
+                               ai <- suppressWarnings(as.numeric(readline(
+                                     "Gaussian FWHM (deg 2θ) [default 0.20]: ")))
+                                  if (!is.finite(ai)) ai <- 0.20 
+                   amorph_fwhm <- ai
+                                  }
+                                  compare_xy_to_library(exp_xy_path = exp_xy, lib_dir = lib_dir)
+                        }
+                      invisible(TRUE)
+                    }
 #
-## --- functions ---
 #
-options(warnPartialMatchDollar = TRUE)
-
+###--- Helper functions ---###
+#
+#
 resample_linear <- function(tt, I, grid) {
-  approx(tt, I, xout = grid, rule = 2, ties = mean)$y
-}
-
+                     approx(tt, I, xout = grid, rule = 2, ties = mean)$y
+                   }
 detect_step <- function(tt) median(diff(tt), na.rm = TRUE)
-
-`%||%` <- function(a, b) if (is.null(a)) b else a                               # tiny `%||%` helper
-
+`%||%` <- function(a, b) if (is.null(a)) b else a                                 # tiny `%||%` helper
 validate_list <- function(x, defaults) {
-  if (is.null(defaults) || !is.list(defaults))
-    stop("defaults must be a list", call. = FALSE)
-  if (is.null(x)) return(defaults)
-  if (!is.list(x)) x <- as.list(x)                                              # allow named atomic vectors or lists
-  if (is.null(names(x)) || any(names(x) == "")) {                               # only keep named entries
-    x <- x[!is.null(names(x)) & names(x) != ""]
-  }
-  modifyList(defaults, x)
-}
-
+                   if (is.null(defaults) || !is.list(defaults))
+                   stop("defaults must be a list", call. = FALSE)
+                   if (is.null(x)) return(defaults)
+                   if (!is.list(x)) x <- as.list(x)                               # allow named atomic vectors or lists
+                   if (is.null(names(x)) || any(names(x) == "")) {                # only keep named entries
+                 x <- x[!is.null(names(x)) & names(x) != ""]
+                   }
+                   modifyList(defaults, x)
+                 }
 # Plot to PNG (pattern match)
 overlay_plot <- function(grid, x, y_shifted_scaled, title, diff = TRUE, file = NULL) {
-  if (!is.null(file)) png(file, width = 1400, height = 900, res = 150)
-  op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
-  layout(matrix(c(1, if (diff) 2 else 1), nrow = if (diff) 2 else 1, byrow = TRUE),
-         heights = if (diff) c(2,1) else 1)
-  par(mar = c(4,4,2,1))
-  yl <- range(x, y_shifted_scaled, finite = TRUE)
-  plot(grid, x, type = "l", col = 1, ylim = yl,
-       xlab = expression(2*theta*" (deg)"), ylab = "Intensity", main = title)
-  lines(grid, y_shifted_scaled, col = 2)
-  legend("topright", bty = "n", lty = 1, col = c(1,2), legend = c("experimental", "library (shifted, scaled)"))
-  if (diff) {
-    par(mar = c(4,4,1,1))
-    plot(grid, x - y_shifted_scaled, type = "l",
-         xlab = expression(2*theta*" (deg)"), ylab = "Difference")
-    abline(h = 0, lty = 3)
-  }
-  if (!is.null(file)) dev.off()
-}
-
+                   if (!is.null(file)) png(file, width = 1400, height = 900, res = 150)
+             op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+                   layout(matrix(c(1, if (diff) 2 else 1), nrow = if (diff) 2 else 1, byrow = TRUE),
+                          heights = if (diff) c(2,1) else 1)
+                   par(mar = c(4,4,2,1))
+             yl <- range(x, y_shifted_scaled, finite = TRUE)
+                   plot(grid, x, type = "l", col = 1, ylim = yl,
+                        xlab = expression(2*theta*" (deg)"), ylab = "Intensity", main = title)
+                   lines(grid, y_shifted_scaled, col = 2)
+                   legend("topright", bty = "n", lty = 1, col = c(1,2), 
+                          legend = c("experimental", "library (shifted, scaled)"))
+                   if (diff) {
+                      par(mar = c(4,4,1,1))
+                      plot(grid, x - y_shifted_scaled, type = "l",
+                           xlab = expression(2*theta*" (deg)"), ylab = "Difference")
+                      abline(h = 0, lty = 3)
+                   }
+                   if (!is.null(file)) dev.off()
+                }
 # Plot to PNG (peak match)
 stick_plot <- function(exp_peaks, lib_peaks_shifted, title) {                
-  op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
-  par(mar = c(4,4,2,1))
-  xr <- range(c(exp_peaks$pos, lib_peaks_shifted$pos))
-  plot(xr, c(0, 1.05), type = "n",
-       xlab = expression(2*theta*" (deg)"), ylab = "Relative peak height", main = title)
-  segments(exp_peaks$pos, 0, exp_peaks$pos, exp_peaks$w, col = 1, lwd = 2)
-  segments(lib_peaks_shifted$pos, 0, lib_peaks_shifted$pos, lib_peaks_shifted$w, col = 2, lwd = 2)
-  legend("topright", bty = "n", lty = 1, col = c(1,2), legend = c("experimental peaks", "library peaks (shifted)"))
-}
-
+           op <- par(no.readonly = TRUE); on.exit(par(op), add = TRUE)
+                 par(mar = c(4,4,2,1))
+           xr <- range(c(exp_peaks$pos, lib_peaks_shifted$pos))
+                 plot(xr, c(0, 1.05), type = "n",
+                      xlab = expression(2*theta*" (deg)"), 
+                      ylab = "Relative peak height", main = title)
+                 segments(exp_peaks$pos, 0, exp_peaks$pos, exp_peaks$w, col = 1, lwd = 2)
+                 segments(lib_peaks_shifted$pos, 0, lib_peaks_shifted$pos, 
+                          lib_peaks_shifted$w, col = 2, lwd = 2)
+                 legend("topright", bty = "n", lty = 1, col = c(1,2), 
+                        legend = c("experimental peaks", "library peaks (shifted)"))
+              }
 # Atomic CSV and PNG writer
 make_unique_path <- function(path) {
-  ext  <- if (grepl("\\.[^.]+$", path)) sub(".*(\\.[^.]+)$", "\\1", path) else ""
-  base <- if (nzchar(ext)) sub(paste0(ext, "$"), "", path) else path
-  for (i in 1:999) {
-    cand <- paste0(base, "-new-", sprintf("%02d", i), ext)
-    if (!file.exists(cand)) return(cand)
-  }
-  stop("Could not create a unique filename for: ", path)
-}
-
+               ext  <- if (grepl("\\.[^.]+$", path)) sub(".*(\\.[^.]+)$", "\\1", path) else ""
+               base <- if (nzchar(ext)) sub(paste0(ext, "$"), "", path) else path
+                       for (i in 1:999) {
+                           cand <- paste0(base, "-new-", sprintf("%02d", i), ext)
+                           if (!file.exists(cand)) return(cand)
+                       }
+                       stop("Could not create a unique filename for: ", path)
+                    }
 safe_write_csv <- function(filename, df, ...) {
-  dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
-  tmp <- paste0(filename, ".tmp")
-  ok <- tryCatch({
-    utils::write.csv(df, tmp, row.names = FALSE, ...)
-    TRUE
-  }, error = function(e) { message("CSV write failed: ", conditionMessage(e)); FALSE })
-  if (!ok) return(invisible(NULL))                                              # Try to finalize atomically; if locked, fall back
-  if (!file.rename(tmp, filename)) {
-    alt <- make_unique_path(filename)
-    if (!file.rename(tmp, alt)) {
-      message("CSV finalize failed (file may be locked). Temp kept at: ", tmp)
-      return(invisible(tmp))
-    } else {
-      message("Target CSV busy; saved as: ", alt)
-      return(invisible(alt))
-    }
-  } else {
-    # sanity check
-    if (file.size(filename) <= 0) message("Warning: CSV saved but size is 0 bytes: ", filename)
-    return(invisible(filename))
-  }
-}
-
-safe_write_png <- function(filename, plotter,
-                           width = 1400, height = 900, res = 150, bg = "white") {
-  dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
-  tmp <- paste0(filename, ".tmp.png")                                           # explicit .png to satisfy some viewers
-  ok <- tryCatch({
-    grDevices::png(tmp, width = width, height = height, res = res, bg = bg)
-    on.exit(try(grDevices::dev.off(), silent = TRUE), add = TRUE)
-    plotter()
-    TRUE
-  }, error = function(e) { message("PNG write failed: ", conditionMessage(e)); FALSE })
-  if (!ok) return(invisible(NULL))
-  if (!file.rename(tmp, filename)) {
-    alt <- make_unique_path(filename)
-    if (!file.rename(tmp, alt)) {
-      message("PNG finalize failed (file may be locked). Temp kept at: ", tmp)
-      return(invisible(tmp))
-    } else {
-      message("Target PNG busy; saved as: ", alt)
-      return(invisible(alt))
-    }
-  } else {
-    if (file.size(filename) <= 0) message("Warning: PNG saved but size is 0 bytes: ", filename)
-    return(invisible(filename))
-  }
-}
-
+                     dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
+              tmp <- paste0(filename, ".tmp")
+               ok <- tryCatch({utils::write.csv(df, tmp, row.names = FALSE, ...)
+                               TRUE}, 
+                               error = function(e) { message("CSV write failed: ", 
+                               conditionMessage(e)); FALSE 
+                               }
+                     )
+                     if (!ok) return(invisible(NULL))                              # Try to finalize atomically; if locked, fall back
+                     if (!file.rename(tmp, filename)) {
+                 alt <- make_unique_path(filename)
+                        if (!file.rename(tmp, alt)) {message(
+                           "CSV finalize failed (file may be locked). Temp kept at: ", 
+                           tmp) return(invisible(tmp))
+                        } else { message("Target CSV busy; saved as: ", alt)
+                            return(invisible(alt))
+                        }
+                     } else { if (file.size(filename) <= 0) message(                  # sanity check
+                                 "Warning: CSV saved but size is 0 bytes: ", filename)
+                              return(invisible(filename))
+                     }
+                  }
+safe_write_png <- function(filename, plotter, width = 1400, height = 900, res = 150, bg = "white") {
+                    dir.create(dirname(filename), showWarnings = FALSE, recursive = TRUE)
+             tmp <- paste0(filename, ".tmp.png")                            # explicit .png to satisfy some viewers
+              ok <- tryCatch( {grDevices::png(tmp, width = width, height = height, 
+                                              res = res, bg = bg)
+                                  on.exit(try(grDevices::dev.off(), silent = TRUE), 
+                                          add = TRUE) plotter() TRUE}, 
+                                  error = function(e) { message("PNG write failed: ", 
+                                             conditionMessage(e))
+                                             FALSE 
+                                          } 
+                            )
+                    if (!ok) return(invisible(NULL))
+                    if (!file.rename(tmp, filename)) {
+                alt <- make_unique_path(filename)
+                       if (!file.rename(tmp, alt)) {message(
+                          "PNG finalize failed (file may be locked). Temp kept at: ", tmp)
+                          return(invisible(tmp))
+                       } else {
+                           message("Target PNG busy; saved as: ", alt)
+                           return(invisible(alt))
+                       }
+                    } else { if (file.size(filename) <= 0) message(
+                                "Warning: PNG saved but size is 0 bytes: ", filename)
+                                return(invisible(filename))
+                    }
+                  }
 # If a usable global lib_dir exists, prompt to reuse or rewrite
 get_or_choose_lib_dir <- function(default = NULL) {
-  prev <- tryCatch(get("lib_dir", envir = .GlobalEnv), error = function(e) NULL)
-  if (is.character(prev) && length(prev) == 1L && nzchar(prev) && dir.exists(prev)) {
-    ans <- tolower(trimws(readline(
-      sprintf("Reuse existing library directory?\n  %s\n[Y/n]: ", normalizePath(prev, winslash = "/"))
-    )))
-    if (ans %in% c("", "y", "yes")) {
-      message("Using library directory: ", normalizePath(prev, winslash = "/"))
-      return(prev)
-    }
-  }
-  sel <- ""
-  if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
-    sel <- tryCatch(rstudioapi::selectDirectory(path = default %||% getwd()),
-                    error = function(e) "")
-  } else if (.Platform$OS.type == "windows") {
-    sel <- utils::choose.dir(default = default %||% getwd())
-    if (is.na(sel)) sel <- ""
-  } else {
-    # Fallback: prompt for a path
-    prompt <- sprintf("Enter library directory path [%s]: ", default %||% getwd())
-    sel <- readline(prompt)
-    if (!nzchar(sel)) sel <- default %||% getwd()
-  }
-  if (!nzchar(sel) || !dir.exists(sel)) stop("No valid library directory chosen.")
-  sel <- normalizePath(sel, winslash = "/")
-  assign("lib_dir", sel, envir = .GlobalEnv)                                    # persist for next run
-  message("Using library directory: ", sel)
-  sel
-}
-
+                    prev <- tryCatch(get("lib_dir", envir = .GlobalEnv), error = function(e) NULL)
+                            if (is.character(prev) && length(prev) == 1L && nzchar(prev) && dir.exists(prev)) {
+                        ans <- tolower(trimws(readline(sprintf(
+                                 "Reuse existing library directory?\n  %s\n[Y/n]: ",
+                                 normalizePath(prev, winslash = "/")))))
+                               if (ans %in% c("", "y", "yes")) {
+                                  message("Using library directory: ", normalizePath(prev, winslash = "/"))
+                                  return(prev)
+                               }
+                            }
+                      sel <- ""
+                            if (requireNamespace("rstudioapi", quietly = TRUE) 
+                               && rstudioapi::isAvailable()) {
+                        sel <- tryCatch(rstudioapi::selectDirectory(path = 
+                                  default %||% getwd()), error = function(e) "")
+                            } else if (.Platform$OS.type == "windows") {
+                               sel <- utils::choose.dir(default = default %||% getwd())
+                                      if (is.na(sel)) sel <- ""
+                            } else {                                               # Fallback: prompt for a path
+                       prompt <- sprintf("Enter library directory path [%s]: ",
+                                         default %||% getwd())
+                          sel <- readline(prompt)
+                                 if (!nzchar(sel)) sel <- default %||% getwd()
+                           }
+                           if (!nzchar(sel) || !dir.exists(sel)) 
+                              stop("No valid library directory chosen.")
+                    sel <- normalizePath(sel, winslash = "/")
+                           assign("lib_dir", sel, envir = .GlobalEnv)             # persist for next run
+                           message("Using library directory: ", sel)  
+                           sel
+                         }
 # global best pattern shift
-best_shift_metrics <- function(x, y_tt, y_I, grid,
-                               max_shift, shift_step,
-                               enforce_nonneg = TRUE,
-                               eps = 1e-9) {
-  same_len  <- length(y_tt) == length(grid)                                     # x: experimental on 'grid'; y: library (tt = y_tt, I = y_I)
-  same_ends <- isTRUE(all.equal(c(y_tt[1], y_tt[length(y_tt)]), c(grid[1],  grid[length(grid)]), tolerance = 1e-6))
-  same_step <- isTRUE(all.equal(detect_step(y_tt), detect_step(grid), tolerance = 1e-9))
-  fast_mode <- same_len && same_ends && same_step
-  step   <- detect_step(grid)
-  shifts <- seq(-max_shift, max_shift, by = shift_step)
-  roll_by_k <- function(v, k) {
-    n <- length(v)
-    if (k > 0) c(rep(NA_real_, k), v[1:(n - k)]) else
-      if (k < 0) c(v[(1 - k):n], rep(NA_real_, -k)) else v
-  }
-  
-  # compute scale with non-negative-residual
-  scaled_rmse <- function(xs, ys) {
-    a_ls <- sum(xs * ys) / sum(ys * ys)
-    a    <- max(0, a_ls)                                                        # LS scale (clamped at 0)
-    if (enforce_nonneg) {
-      pos <- ys > eps & is.finite(xs)
-      if (any(pos)) {                                                           # cap so x - a*y >= 0 for all points with y > eps
-        a_cap <- min(xs[pos] / ys[pos], na.rm = TRUE)
-        if (is.finite(a_cap)) a <- min(a, a_cap)
-      }
-    }
-    rm <- sqrt(mean((xs - a * ys)^2))
-    list(a = a, rm = rm)
-  }
-  best <- list(r = -Inf, shift = 0, cos = NA_real_, rmse = Inf, a = 1)
-  for (s in shifts) {
-    y_shift <- if (fast_mode && abs(s/step - round(s/step)) < 1e-6) {
-      k <- as.integer(round(s / step)); roll_by_k(y_I, k)
-    } else {
-      approx(y_tt + s, y_I, xout = grid, rule = 2, ties = mean)$y
-    }
-    ok <- is.finite(x) & is.finite(y_shift)
-    if (!any(ok)) next
-    xs <- pmax(x[ok], 0)                                                       # guard against tiny negatives after baseline
-    ys <- pmax(y_shift[ok], 0)
-    if (sd(xs) == 0 || sd(ys) == 0) next
-    r   <- suppressWarnings(cor(xs, ys))
-    cos <- sum(xs * ys) / sqrt(sum(xs^2) * sum(ys^2))
-    sr  <- scaled_rmse(xs, ys)
-    if (is.finite(r) && r > best$r) {
-      best <- list(r = r, shift = s, cos = cos, rmse = sr$rm, a = sr$a)
-    }
-  }
-  best
-}
-
+best_shift_metrics <- function(x, y_tt, y_I, grid, max_shift, shift_step,
+                               enforce_nonneg = TRUE, eps = 1e-9) {
+            same_len  <- length(y_tt) == length(grid)                             # x: experimental on 'grid'; y: library (tt = y_tt, I = y_I)
+            same_ends <- isTRUE(all.equal(c(y_tt[1], y_tt[length(y_tt)]), 
+                                c(grid[1], grid[length(grid)]), tolerance = 1e-6))
+            same_step <- isTRUE(all.equal(detect_step(y_tt), 
+                                          detect_step(grid), tolerance = 1e-9))
+            fast_mode <- same_len && same_ends && same_step
+                 step <- detect_step(grid)
+               shifts <- seq(-max_shift, max_shift, by = shift_step)
+            roll_by_k <- function(v, k) { 
+                       n <- length(v)
+                            if (k > 0) c(rep(NA_real_, k), v[1:(n - k)]) 
+                            else if (k < 0) c(v[(1 - k):n], rep(NA_real_, -k)) 
+                            else v
+                         }
+          scaled_rmse <- function(xs, ys) {                                       # compute scale with non-negative-residual
+                    a_ls <- sum(xs * ys) / sum(ys * ys)
+                       a <- max(0, a_ls)                                          # LS scale (clamped at 0)
+                            if (enforce_nonneg) {
+                               pos <- ys > eps & is.finite(xs)
+                               if (any(pos)) {                                    # cap so x - a*y >= 0 for all points with y > eps
+                                  a_cap <- min(xs[pos] / ys[pos], na.rm = TRUE)
+                                  if (is.finite(a_cap)) a <- min(a, a_cap)
+                               }
+                            }
+                      rm <- sqrt(mean((xs - a * ys)^2))
+                            list(a = a, rm = rm)
+                         }
+                 best <- list(r= -Inf,shift= 0,cos= NA_real_, rmse = Inf, a = 1)
+                         for (s in shifts) {
+                 y_shift <- if (fast_mode && abs(s/step-round(s/step)) < 1e-6) {
+                          k <- as.integer(round(s / step)); roll_by_k(y_I, k)
+                            } else { approx(y_tt + s, y_I, xout = grid, rule = 2, 
+                                            ties = mean)$y
+                            }
+                      ok <- is.finite(x) & is.finite(y_shift)
+                            if (!any(ok)) next
+                      xs <- pmax(x[ok], 0)                                        # guard against tiny negatives after baseline
+                      ys <- pmax(y_shift[ok], 0)
+                            if (sd(xs) == 0 || sd(ys) == 0) next
+                      r  <- suppressWarnings(cor(xs, ys))
+                     cos <- sum(xs * ys) / sqrt(sum(xs^2) * sum(ys^2))
+                     sr  <- scaled_rmse(xs, ys)
+                            if (is.finite(r) && r > best$r) {
+                       best <- list(r = r, shift = s, cos = cos, rmse = sr$rm, a = sr$a)
+                            }
+                         }
+                         best
+                      }
 # Area-preserving Gaussian “amorphization” steps
-.gauss_kernel <- function(fwhm_deg, step_deg, n_sigma = 3) {
-  if (!is.finite(fwhm_deg) || fwhm_deg <= 0) return(1)     # degenerate without smoothing
-  sigma <- fwhm_deg / (2 * sqrt(2 * log(2)))
-  half  <- max(1L, ceiling(n_sigma * sigma / step_deg))
-  xk    <- (-half:half) * step_deg
-  k     <- exp(-0.5 * (xk / sigma)^2)
-  k / sum(k)                                                                    # unit area
-}
-amorphize_gauss <- function(I, step_deg, fwhm_deg) {
-  if (!is.finite(fwhm_deg) || fwhm_deg <= 0) return(as.numeric(I))
-  k <- .gauss_kernel(fwhm_deg, step_deg)
-  pad <- length(k) %/% 2
-  n <- length(I)
-  ypad <- c(rev(I[2:(pad+1)]), I, rev(I[(n-pad):(n-1)]))                        # pad grid space to avoid edge losses and center
-  yconv <- stats::filter(ypad, k, sides = 2, circular = FALSE)
-  as.numeric(yconv[(pad+1):(pad+n)])
-}
+.gauss_kernel <- function(fwhm, step_deg, n_sigma = 3) {
+                    if (!is.finite(fwhm) || fwhm <= 0) return(1)                  # degenerate without smoothing
+           sigma <- fwhm / (2 * sqrt(2 * log(2)))
+           half  <- max(1L, ceiling(n_sigma * sigma / step_deg))
+           xk    <- (-half:half) * step_deg
+           k     <- exp(-0.5 * (xk / sigma)^2)
+                    k / sum(k)                                                    # unit area
+                 }
+amorphize_gauss <- function(I, step_deg, fwhm) {
+                      if (!is.finite(fwhm) || fwhm <= 0) return(as.numeric(I))
+                 k <- .gauss_kernel(fwhm, step_deg)
+               pad <- length(k) %/% 2
+                 n <- length(I)
+              ypad <- c(rev(I[2:(pad+1)]), I, rev(I[(n-pad):(n-1)]))              # pad grid space to avoid edge losses and center
+             yconv <- stats::filter(ypad, k, sides = 2, circular = FALSE)
+                      as.numeric(yconv[(pad+1):(pad+n)])
+                   }
 
 # Peak extraction (library)
 extract_peaks <- function(tt, I, det = DEFAULT_DET_LIB) {
-  det <- validate_list(det, DEFAULT_DET_LIB)
-  with(det, {
-  I <- pmax(I, 0)
-  n <- length(I)
-  if (!n || !any(is.finite(I))) {
-    return(data.frame(pos = numeric(0), w = numeric(0), is_imax = logical(0)))
-  }
-  Imax_val  <- max(I, na.rm = TRUE); if (!is.finite(Imax_val) || Imax_val <= 0) Imax_val <- 1
-  imax_idx  <- which.max(I)
-  d2  <- diff(sign(diff(I)))                                                    # enforce local maxima
-  idx <- which(c(FALSE, d2 == -2, FALSE))
-  if (!(imax_idx %in% idx)) idx <- sort(unique(c(idx, imax_idx)))
-  rel  <- I[idx] / Imax_val                                                     # detect relative heights
-  keep <- which(rel >= rel_min)
-  if (!length(keep)) keep <- which.max(rel)                                     # always keep tallest peak
-  idx  <- idx[keep]; rel <- rel[keep]
-  pos <- tt[idx]; w <- rel                          
-  if (is.finite(w_gamma) && w_gamma != 1) {                                         # dynamic-range compression
-    w <- w^W_gamma
-    w <- w / max(w, na.rm = TRUE)
-  }
-  ord   <- order(-w)                                                            # enforce minimum spacing
-  sel   <- logical(length(idx))
-  taken <- rep(FALSE, length(idx))
-  for (k in ord) {
-    if (taken[k]) next
-    sel[k] <- TRUE
-    taken  <- taken | (abs(pos - pos[k]) < min_spacing)
-  }
-  idx_sel <- idx[sel]
-  pos_sel <- pos[sel]
-  w_sel   <- w[sel]
-  is_imax_sel <- idx_sel == imax_idx                                            # mark peak at global Imax
-  data.frame(pos = pos_sel, w = w_sel, is_imax = is_imax_sel, row.names = NULL)
-  })
-}
-
+             det <- validate_list(det, DEFAULT_DET_LIB)
+                    with(det, {
+                  I <- pmax(I, 0)
+                  n <- length(I)
+                       if (!n || !any(is.finite(I))) {
+                          return(data.frame(pos = numeric(0), w = numeric(0), 
+                                            is_imax = logical(0))) 
+                       }
+          Imax_val  <- max(I, na.rm = TRUE) 
+                       if (!is.finite(Imax_val) || Imax_val <= 0) Imax_val <- 1
+          imax_idx  <- which.max(I)
+                d2  <- diff(sign(diff(I)))                                         # enforce local maxima
+                idx <- which(c(FALSE, d2 == -2, FALSE))
+                       if (!(imax_idx %in% idx)) idx <- sort(unique(c(idx, imax_idx)))
+               rel  <- I[idx] / Imax_val                                           # detect relative heights
+               keep <- which(rel >= rel_min) 
+                       if (!length(keep)) keep <- which.max(rel)                   # always keep tallest peak
+               idx  <- idx[keep]
+                rel <- rel[keep]
+                pos <- tt[idx]
+                  w <- rel                          
+                       if (is.finite(w_gamma) && w_gamma != 1) {                   # dynamic-range compression
+                     w <- w^W_gamma
+                     w <- w / max(w, na.rm = TRUE)
+                       }
+              ord   <- order(-w)                                                   # enforce minimum spacing
+              sel   <- logical(length(idx))
+              taken <- rep(FALSE, length(idx))
+                       for (k in ord) {
+                          if (taken[k]) next
+                sel[k] <- TRUE
+                taken  <- taken | (abs(pos - pos[k]) < min_spacing)
+                       }
+            idx_sel <- idx[sel]
+            pos_sel <- pos[sel]
+            w_sel   <- w[sel]
+        is_imax_sel <- idx_sel == imax_idx                                         # mark peak at global Imax
+                       data.frame(pos = pos_sel, w = w_sel, is_imax = is_imax_sel, row.names = NULL)
+                    })
+                }
 # library indexing
 build_library_index <- function(lib_dir, rel_min = 0.20, min_spacing = 0.06) {
   files <- list.files(lib_dir, pattern = "\\.xy$", full.names = TRUE, ignore.case = TRUE)
@@ -518,35 +505,31 @@ match_score_shift <- function(exp_peaks, lib_peaks, shift,
 }
 
 # Fit peak matches
-best_shift_for_library <- function(exp_peaks, lib_peaks,
-                                   scan = DEFAULT_SCAN,
+best_shift_for_library <- function(exp_peaks, lib_peaks, scan = DEFAULT_SCAN, 
                                    cfg  = DEFAULT_CFG) {
-  scan <- validate_list(scan, DEFAULT_SCAN)
-  cfg  <- validate_list(cfg,  DEFAULT_CFG)
-  
-  best <- list(score = -Inf, shift = NA_real_, matches = 0L,
-               matched_lib_w = 0, total_lib_w = 0,
-               heavy_missed_w = 0, heavy_total_w = 0,
-               pairs_idx = list(e = integer(0), l = integer(0)))
-  
-  # coarse scan (use scan$*)
-  shifts <- seq(-scan$max_shift, scan$max_shift, by = scan$shift_step)
-  for (s in shifts) {
-    sc <- match_score_shift(exp_peaks, lib_peaks, shift = s, cfg = cfg, return_pairs = TRUE)
-    if (is.finite(sc$score) && sc$score > best$score) best <- c(sc, list(shift = s))
-  }
-  
-  # optional refinement (use scan$*)
-  if (isTRUE(scan$refine) && is.finite(best$shift)) {
-    fine <- seq(best$shift - scan$refine_win, best$shift + scan$refine_win, by = scan$refine_step)
-    for (s in fine) {
-      sc <- match_score_shift(exp_peaks, lib_peaks, shift = s, cfg = cfg, return_pairs = TRUE)
-      if (is.finite(sc$score) && sc$score > best$score) best <- c(sc, list(shift = s))
-    }
-  }
-  
-  best
-}
+                     scan <- validate_list(scan, DEFAULT_SCAN)
+                     cfg  <- validate_list(cfg,  DEFAULT_CFG)
+                     best <- list(score = -Inf, shift = NA_real_, matches = 0L,
+                                  matched_lib_w = 0, total_lib_w = 0,
+                                  heavy_missed_w = 0, heavy_total_w = 0,
+                                  pairs_idx= list(e= integer(0), l= integer(0)))
+                   shifts <- seq(-scan$max_shift,scan$max_shift,by=scan$shift_step) # coarse scan (use scan$*)
+                             for (s in shifts) {
+                          sc <- match_score_shift(exp_peaks, lib_peaks, shift = s, cfg = cfg, return_pairs = TRUE)
+                                if (is.finite(sc$score) && sc$score > best$score) best <- c(sc, list(shift = s))
+                                }
+                             if (isTRUE(scan$refine) && is.finite(best$shift)){     # optional refinement (use scan$*)
+                        fine <- seq(best$shift - scan$refine_win, best$shift +
+                                    scan$refine_win, by = scan$refine_step)
+                                for (s in fine) {
+                                   sc <- match_score_shift(exp_peaks, lib_peaks, 
+                                           shift = s, cfg = cfg, return_pairs = TRUE)
+                                   if (is.finite(sc$score) && sc$score > best$score) 
+                              best <- c(sc, list(shift = s))
+                                }
+                             }
+                             best
+                          }
 
 #
 ## --- peak matching script ---
